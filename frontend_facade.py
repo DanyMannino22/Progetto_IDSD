@@ -6,7 +6,7 @@ import requests
 BACKEND_URL = "http://127.0.0.1:8000/generate-tests"
 
 # --- Funzione che interagisce con la Facade Remota ---
-# Questa funzione ora è molto più semplice. Raccoglie i dati strutturati
+# Questa funzione raccoglie i dati strutturati
 # dall'interfaccia utente e li invia all'endpoint corretto.
 def get_unit_tests(code, language, history):
     """
@@ -19,7 +19,7 @@ def get_unit_tests(code, language, history):
         return history, ""
 
     try:
-        # La richiesta ora invia un JSON strutturato, come richiesto dalla Pydantic model del backend.
+        # La richiesta invia un JSON strutturato.
         payload = {"code": code, "language": language}
         response = requests.post(BACKEND_URL, json=payload)
         
@@ -56,7 +56,6 @@ with gr.Blocks(theme=gr.themes.Glass(), css=".example { padding: 8px; } .gr-chat
     gr.Markdown("Inserisci una classe o una funzione e seleziona il linguaggio. L'AI genererà gli unit test per te.")
 
     with gr.Row():
-        # Il chatbot ora occupa più spazio per una migliore leggibilità
         chatbot = gr.Chatbot(label="Conversazione", bubble_full_width=False, height=400)
 
     with gr.Row():
