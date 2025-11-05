@@ -1,4 +1,3 @@
-# frontend_facade.py
 import gradio as gr
 import requests
 
@@ -6,61 +5,68 @@ import requests
 BACKEND_URL = "http://127.0.0.1:8000/generate-tests"
 
 # --- Funzione che interagisce con la Facade Remota ---
-# Questa funzione ora è molto più semplice. Raccoglie i dati strutturati
-# dall'interfaccia utente e li invia all'endpoint corretto.
 def get_unit_tests(code, language, history):
     """
-    Invia il codice e il linguaggio al backend per la generazione dei test.
+    Invia il codice e il linguaggio al backend per la generazione e l'esecuzione dei test.
     """
     if not code or not language:
-        # Aggiunge un messaggio di errore alla chat se i campi non sono compilati
         history = history or []
         history.append(("Mancano dati", "Per favore, inserisci sia il codice che il linguaggio prima di inviare."))
         return history, ""
 
     try:
-        # La richiesta ora invia un JSON strutturato, come richiesto dalla Pydantic model del backend.
         payload = {"code": code, "language": language}
         response = requests.post(BACKEND_URL, json=payload)
         
         # Controlla se la richiesta ha avuto successo
         response.raise_for_status() 
         
-        bot_message = response.json().get("test_code", "Nessun codice di test ricevuto.")
+        response_data = response.json()
+        
+        # **MODIFICA CHIAVE:** Estrazione di entrambi i campi
+        test_code = response_data.get("test_code", "Nessun codice di test ricevuto.")
+        execution_result = response_data.get("execution_result", "Nessun risultato di esecuzione ricevuto.")
+        
+        # **MODIFICA CHIAVE:** Formattazione del messaggio per il client
+        bot_message = (
+            f"**Codice Test Generato ({language}):**\n"
+            f"```{language}\n{test_code}\n```\n\n"
+            f"**Risultato dell'Esecuzione:**\n"
+            f"```text\n{execution_result}\n```"
+        )
         
         # Aggiunge l'input dell'utente e la risposta del bot alla cronologia della chat
         history = history or []
-        history.append((f"Codice ({language}):\n```\n{code}\n```", bot_message))
+        history.append((f"Codice sorgente ({language}):\n```\n{code}\n```", bot_message))
         
         # Ritorna la cronologia aggiornata e pulisce la textbox del codice
         return history, ""
 
     except requests.exceptions.RequestException as e:
         # Gestisce errori di connessione o HTTP
-        error_message = f"Errore di comunicazione con il backend: {str(e)}"
-        print(error_message)
+        error_detail = e.response.json().get('detail', 'Nessun dettaglio errore.') if e.response is not None and e.response.content else str(e)
+        error_message = f"Errore di comunicazione con il backend: {error_detail}"
+        print(f"ERRORE FRONTEND: {error_message}")
         history = history or []
         history.append((code, error_message))
         return history, ""
     except Exception as e:
         # Gestisce altri errori imprevisti
         error_message = f"Si è verificato un errore: {str(e)}"
-        print(error_message)
+        print(f"ERRORE GENERICO: {error_message}")
         history = history or []
         history.append((code, error_message))
         return history, ""
 
-# --- Interfaccia Utente con Gradio ---
+# --- Interfaccia Utente con Gradio (il resto rimane invariato) ---
 with gr.Blocks(theme=gr.themes.Glass(), css=".example { padding: 8px; } .gr-chatbot { height: 400px !important; }") as demo:
     gr.Markdown("# 🤖 Assistente AI per la Generazione di Unit Test")
     gr.Markdown("Inserisci una classe o una funzione e seleziona il linguaggio. L'AI genererà gli unit test per te.")
 
     with gr.Row():
-        # Il chatbot ora occupa più spazio per una migliore leggibilità
         chatbot = gr.Chatbot(label="Conversazione", bubble_full_width=False, height=400)
 
     with gr.Row():
-        # Input strutturati: un'area di testo per il codice e un menu a tendina per il linguaggio
         code_input = gr.Code(label="Codice da testare", language=None, lines=10)
     
     with gr.Row():
