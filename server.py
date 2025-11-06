@@ -8,68 +8,124 @@ from pathlib import Path
 import shutil
 import re
 import subprocess
-from starlette.concurrency import run_in_threadpool # Importato per threading
+from starlette.concurrency import run_in_threadpool 
 
-# Carica le variabili d'ambiente da un file .env
+# Carica le variabili d'ambiente
 load_dotenv()
 groq_api_key = os.getenv("GROQ_API_KEY")
 
-# --- Validazione della chiave API ---
 if not groq_api_key:
     raise ValueError("La variabile d'ambiente GROQ_API_KEY non è stata impostata.")
 
-# --- Configurazione del Salvataggio File ---
-# La variabile globale che definisce il percorso della cartella
+# --- Costanti e Configurazione ---
 OUTPUT_DIR = Path("generated_files")
+JAVA_MAIN_DIR = Path("src") / "main" / "java"
+JAVA_TEST_DIR = Path("src") / "test" / "java"
 
-# Inizializza l'applicazione FastAPI
+# Contenuto di un pom.xml minimalista per JUnit 5
+POM_CONTENT = """
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.ai</groupId>
+    <artifactId>generated-tests</artifactId>
+    <version>1.0</version>
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <junit.jupiter.version>5.9.1</junit.jupiter.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <version>${junit.jupiter.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.0.0-M5</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+"""
+
 app = FastAPI(
     title="Test Generation Service",
-    description="Un microservizio che utilizza un LLM per generare unit test da codice sorgente.",
+    description="Microservizio che utilizza un LLM per generare ed eseguire unit test.",
     version="1.0.0"
 )
+client = Groq(api_key=groq_api_key)
 
 # --- Gestore di Shutdown per la pulizia ---
 @app.on_event("shutdown")
 def delete_output_directory():
-    """Rimuove la directory di output quando il server viene spento."""
     if OUTPUT_DIR.is_dir():
         try:
             shutil.rmtree(OUTPUT_DIR)
-            print(f"\n[SHUTDOWN] Cartella di output rimossa con successo: {OUTPUT_DIR.resolve()}")
+            print(f"\n[SHUTDOWN] Cartella di output rimossa: {OUTPUT_DIR.resolve()}")
         except Exception as e:
             print(f"\n[ERRORE SHUTDOWN] Impossibile rimuovere la cartella {OUTPUT_DIR}: {e}")
 
-# Inizializza il client Groq
-client = Groq(api_key=groq_api_key)
+# --- Funzioni di Utility ---
 
-# --- Funzione Ausiliaria per la Pulizia del Codice LLM ---
 def clean_generated_code(response: str) -> str:
     """Estrae il codice contenuto all'interno del primo blocco di codice (```) trovato."""
-    # Pattern corretto
     code_block_pattern = re.compile(r"^\s*```[a-zA-Z0-9#+\s-]*\n(.*?)\n\s*```\s*$", re.DOTALL | re.MULTILINE)
-    
     match = code_block_pattern.search(response)
-    
     if match:
         return match.group(1).strip()
-    
     return response.strip()
 
-# --- Funzione Ausiliaria per il Salvataggio File ---
+def extract_class_name(code: str) -> str:
+    """Estrae il nome della classe dal codice sorgente o di test Java/Python."""
+    # Pattern per Java (class Nome) o Python (class Nome(...))
+    match = re.search(r'(?:public\s+)?class\s+(\w+)', code)
+    if match:
+        return match.group(1)
+    return f"Target_{time.strftime('%H%M%S')}"
+
+def clean_java_files(working_dir: Path):
+    """Rimuove tutti i file .java e pom.xml dalla directory di lavoro."""
+    # Rimuove pom.xml
+    pom_file = working_dir / "pom.xml"
+    if pom_file.exists():
+        pom_file.unlink()
+
+    # Rimuove i file .java in tutta la struttura Maven
+    for root, _, files in os.walk(working_dir, topdown=False):
+        for file in files:
+            if file.endswith(".java"):
+                try:
+                    os.unlink(Path(root) / file)
+                except OSError as e:
+                    print(f"Errore rimozione file: {e}")
+    # Tentativo di rimuovere le directory Maven vuote per pulizia
+    try:
+        if (working_dir / 'src').is_dir():
+             shutil.rmtree(working_dir / 'src', ignore_errors=True)
+        if (working_dir / 'target').is_dir():
+             shutil.rmtree(working_dir / 'target', ignore_errors=True)
+    except Exception:
+        pass
+
+
 def save_code_to_file(content: str, file_type: str, language: str, timestamp: str) -> str:
-    """Salva il contenuto in un file locale e restituisce il percorso assoluto."""
-    extension_map = {
-        "python": "py", "java": "java", "javascript": "js", 
-        "typescript": "ts", "c#": "cs"
-    }
+    """Salva il contenuto in un file temporaneo e restituisce il percorso assoluto."""
+    extension_map = {"python": "py", "java": "java", "javascript": "js", "typescript": "ts", "c#": "cs"}
     lang_lower = language.lower().replace("#", "sharp") 
-    ext = extension_map.get(lang_lower, "txt")
     
-    # Per Python, il codice sorgente viene salvato come 'target_module' per l'importazione
     if language.lower() == "python" and file_type == "source":
         filename = "target_module.py"
     else:
+        ext = extension_map.get(lang_lower, "txt")
         filename = f"{timestamp}_{file_type}_{lang_lower}.{ext}"
         
     file_path = OUTPUT_DIR / filename
@@ -77,62 +133,104 @@ def save_code_to_file(content: str, file_type: str, language: str, timestamp: st
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
-        print(f"Salvataggio completato: {filename}")
-        return str(file_path.resolve()) # Restituisce il percorso assoluto
+        return str(file_path.resolve())
     except Exception as e:
         print(f"Errore durante il salvataggio del file {filename}: {e}")
         return ""
 
 # --- Funzione per l'Esecuzione dei Test (Sincrona) ---
+
 def execute_tests(language: str, source_path_str: str, test_path_str: str) -> str:
     """
-    Esegue i test sul codice fornito utilizzando subprocess.
-    Questa funzione è sincrona e deve essere eseguita in un threadpool.
+    Esegue i test sul codice fornito (Python o Java). 
+    Questa funzione è sincrona e viene eseguita in un threadpool.
     """
     language = language.lower()
     working_dir = Path(source_path_str).parent
     
+    source_content = Path(source_path_str).read_text(encoding="utf-8")
+    test_content = Path(test_path_str).read_text(encoding="utf-8")
+    
+    # --- LOGICA PYTHON ---
     if language == "python":
         
-        # 1. Creiamo un file __init__.py per trattare la cartella come un modulo Python.
         init_file = working_dir / "__init__.py"
         init_file.touch()
-        
         test_file_name = Path(test_path_str).name
 
         try:
-            # Comando: python -m unittest -v <nome_file_test>
             command = ["python", "-m", "unittest", "-v", test_file_name]
-            
-            # Esecuzione del comando
             result = subprocess.run(
-                command, 
-                cwd=working_dir, 
-                capture_output=True, 
-                text=True, 
-                timeout=15 
+                command, cwd=working_dir, capture_output=True, text=True, timeout=15 
             )
             
-            # Restituisce l'output combinato per mostrare successi e fallimenti
             output = result.stdout + result.stderr
-            
-            # Pulizia: rimuove il file __init__.py dopo l'esecuzione
             init_file.unlink()
-            
             return output
         
         except subprocess.TimeoutExpired:
-            return "Execution Error: Test execution timed out (max 15 seconds)."
+            return "Execution Error: Python execution timed out (max 15 seconds)."
         except FileNotFoundError:
             return "Execution Error: Python interpreter ('python' command) not found."
         except Exception as e:
-            return f"Execution Error: An unexpected error occurred during execution: {e}"
+            return f"Execution Error: An unexpected error occurred during Python execution: {e}"
 
-    elif language in ["java", "c#", "javascript", "typescript"]:
-        return f"Test execution not fully implemented for {language}."
-    
+    # --- LOGICA JAVA (Maven) ---
+    elif language == "java":
+        
+        # 1. Setup Struttura Maven
+        main_dir = working_dir / JAVA_MAIN_DIR
+        test_dir = working_dir / JAVA_TEST_DIR
+        main_dir.mkdir(parents=True, exist_ok=True)
+        test_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 2. Scrittura dei file nei percorsi Maven
+        source_class_name = extract_class_name(source_content)
+        test_class_name = extract_class_name(test_content)
+        
+        # Sovrascrive i file nella struttura Maven (importante)
+        (main_dir / f"{source_class_name}.java").write_text(source_content, encoding="utf-8")
+        (test_dir / f"{test_class_name}.java").write_text(test_content, encoding="utf-8")
+        
+        # 3. Scrittura pom.xml
+        (working_dir / "pom.xml").write_text(POM_CONTENT, encoding="utf-8")
+        
+        # 4. Esecuzione Maven
+        try:
+            command = "mvn test" 
+            
+            result = subprocess.run(
+                command,
+                cwd=working_dir,
+                capture_output=True,
+                text=True,
+                timeout=45,
+                shell=True
+            )
+            
+            output = result.stdout + result.stderr
+            
+            # Parsing dell'output di Maven
+            if "BUILD SUCCESS" in output:
+                return "Maven BUILD SUCCESS. Output completo dell'esecuzione:\n\n" + output
+            
+            elif "BUILD FAILURE" in output:
+                 return "Maven BUILD FAILURE. Compilazione o fallimento dei test.\n\n" + output[-3000:]
+                 
+            return output 
+            
+        except subprocess.TimeoutExpired:
+            return "Execution Error: Maven execution timed out (max 45 seconds)."
+        except FileNotFoundError:
+            return "Execution Error: Maven ('mvn' command) non trovato. Assicurati che Maven sia installato e nel tuo PATH."
+        except Exception as e:
+            return f"Execution Error: Errore imprevisto durante l'esecuzione Maven: {e}"
+
+    # --- Altri Linguaggi ---
+    elif language in ["c#", "javascript", "typescript"]:
+        return f"Test execution non implementata per {language}."
     else:
-        return f"Language {language} not supported for execution."
+        return f"Linguaggio {language} non supportato per l'esecuzione."
 
 # --- Modello di Richiesta Strutturata ---
 class TestGenerationRequest(BaseModel):
@@ -140,28 +238,43 @@ class TestGenerationRequest(BaseModel):
     language: str
 
 # --- Implementazione del Pattern Remote Facade (Asincrono) ---
+
 @app.post("/generate-tests", summary="Genera Unit Test per il codice fornito")
 async def generate_tests(request: TestGenerationRequest):
-    """Genera, salva ed esegue i test sul codice sorgente."""
     
     OUTPUT_DIR.mkdir(exist_ok=True)
     
+    # Pulizia preliminare in base al linguaggio
+    if request.language.lower() == "java":
+        clean_java_files(OUTPUT_DIR)
+    
+    # *** NUOVO PROMPT CON ISTRUZIONI CONDIZIONALI ***
+    source_class_name = extract_class_name(request.code)
+    
     prompt = f"""
-    Sei un ingegnere del software esperto specializzato in testing.
-    Il tuo compito è scrivere unit test chiari, concisi e completi.
-    Scrivi gli unit test per la seguente classe in linguaggio {request.language}.
-    Assicurati di coprire i casi principali e i casi limite (edge cases).
+    Sei un ingegnere del software esperto specializzato in testing. Il tuo compito è scrivere unit test chiari, concisi e completi per il codice fornito, utilizzando il linguaggio **{request.language}**.
+
+    **REGOLE GENERALI:**
+    1. Fornisci SOLO il codice del test. Non includere spiegazioni, introduzioni, conclusioni, o delimitatori del blocco di codice (come ```java o ```python).
+    2. Il valore atteso nell'asserzione DEVE essere matematicamente CORRETTO.
+
+    **REGOLE SPECIFICHE PER LINGUAGGIO ({request.language}):**
     
-    ***PUNTO CRUCIALE: Nel test, il valore atteso nell'asserzione (expected value) DEVE essere il risultato matematicamente CORRETTO dell'operazione, non il risultato che il codice sorgente potrebbe produrre a causa di un bug.***
+    [IF JAVA]:
+    - **JUnit 5:** Utilizza sempre JUnit 5. Includi l'importazione per l'annotazione @Test. Includi l'import statico completo: `import static org.junit.jupiter.api.Assertions.*;`.
+    - **Getter:** Assumi l'esistenza di un metodo **getter pubblico standard** (es. `getNome()`) per accedere ai campi privati.
+    - **Output:** Non creare asserzioni su metodi che scrivono solo su console (`System.out.println`).
     
-    Fornisci **SOLO** il codice del test. Non includere spiegazioni, introduzioni, conclusioni, o delimitatori del blocco di codice (come ```python o ```).
-    Per i test in Python, includi l'istruzione 'import unittest' e fai riferimento al codice da testare come se fosse importato da un modulo chiamato 'target_module' (ad esempio: 'from target_module import NomeDellaTuaClasse').
+    [IF PYTHON]:
+    - **Unittest:** Utilizza il modulo standard `unittest`.
+    - **Importazione:** Devi importare il codice da testare usando `from target_module import {source_class_name}`.
 
     Codice da testare:
     ```{request.language}
     {request.code}
     ```
     """
+    # *************************************************
 
     try:
         # 1. Chiamata LLM
@@ -175,11 +288,17 @@ async def generate_tests(request: TestGenerationRequest):
         raw_generated_code = chat_completion.choices[0].message.content
         generated_test_code = clean_generated_code(raw_generated_code)
 
-        # 2. POST-PROCESSING: GARANTISCI L'IMPORT DI UNITTEST PER PYTHON
+        # 2. POST-PROCESSING (Per robustezza su Python e Java)
         if request.language.lower() == "python":
+            # Correzione Python: assicura l'import unittest (anche se il prompt lo chiede)
             if "import unittest" not in generated_test_code:
-                # Inserisce l'import all'inizio
                 generated_test_code = "import unittest\n" + generated_test_code
+        
+        elif request.language.lower() == "java":
+            # Correzione Java: assicura l'import @Test
+            junit_test_import = "import org.junit.jupiter.api.Test;"
+            if junit_test_import not in generated_test_code:
+                generated_test_code = junit_test_import + "\n" + generated_test_code
 
         # 3. Logica di SALVATAGGIO LOCALE
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -195,7 +314,6 @@ async def generate_tests(request: TestGenerationRequest):
         
         if source_path_str and test_path_str:
             # 4. ESECUZIONE DEI TEST IN THREADPOOL
-            # run_in_threadpool sposta la funzione sincrona (execute_tests) in un thread
             test_result = await run_in_threadpool(
                 execute_tests, 
                 request.language, 
@@ -210,11 +328,9 @@ async def generate_tests(request: TestGenerationRequest):
         }
 
     except Exception as e:
-        # Gestione robusta degli errori
         print(f"ERRORE DETTAGLIATO: {e}")
         raise HTTPException(status_code=500, detail=f"Errore durante la comunicazione con l'LLM: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
-    # Esegui il server sulla porta 8000
     uvicorn.run(app, host="127.0.0.1", port=8000)
