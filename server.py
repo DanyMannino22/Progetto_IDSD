@@ -151,6 +151,9 @@ async def generate_tests(request: TestGenerationRequest):
     Il tuo compito è scrivere unit test chiari, concisi e completi.
     Scrivi gli unit test per la seguente classe in linguaggio {request.language}.
     Assicurati di coprire i casi principali e i casi limite (edge cases).
+    
+    ***PUNTO CRUCIALE: Nel test, il valore atteso nell'asserzione (expected value) DEVE essere il risultato matematicamente CORRETTO dell'operazione, non il risultato che il codice sorgente potrebbe produrre a causa di un bug.***
+    
     Fornisci **SOLO** il codice del test. Non includere spiegazioni, introduzioni, conclusioni, o delimitatori del blocco di codice (come ```python o ```).
     Per i test in Python, includi l'istruzione 'import unittest' e fai riferimento al codice da testare come se fosse importato da un modulo chiamato 'target_module' (ad esempio: 'from target_module import NomeDellaTuaClasse').
 
