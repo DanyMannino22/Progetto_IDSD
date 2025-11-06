@@ -23,11 +23,11 @@ def get_unit_tests(code, language, history):
         
         response_data = response.json()
         
-        # **MODIFICA CHIAVE:** Estrazione di entrambi i campi
+        # Estrazione di entrambi i campi
         test_code = response_data.get("test_code", "Nessun codice di test ricevuto.")
         execution_result = response_data.get("execution_result", "Nessun risultato di esecuzione ricevuto.")
         
-        # **MODIFICA CHIAVE:** Formattazione del messaggio per il client
+        # Formattazione del messaggio per il client
         bot_message = (
             f"**Codice Test Generato ({language}):**\n"
             f"```{language}\n{test_code}\n```\n\n"
@@ -58,7 +58,7 @@ def get_unit_tests(code, language, history):
         history.append((code, error_message))
         return history, ""
 
-# --- Interfaccia Utente con Gradio (il resto rimane invariato) ---
+# --- Interfaccia Utente con Gradio ---
 with gr.Blocks(theme=gr.themes.Glass(), css=".example { padding: 8px; } .gr-chatbot { height: 400px !important; }") as demo:
     gr.Markdown("# 🤖 Assistente AI per la Generazione di Unit Test")
     gr.Markdown("Inserisci una classe o una funzione e seleziona il linguaggio. L'AI genererà gli unit test per te.")
