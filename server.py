@@ -8,13 +8,14 @@ from pathlib import Path
 import shutil
 import re
 import subprocess
-from starlette.concurrency import run_in_threadpool 
+from starlette.concurrency import run_in_threadpool  # Import per l'esecuzione asincrona
 
 # Carica le variabili d'ambiente
 load_dotenv()
 groq_api_key = os.getenv("GROQ_API_KEY")
 
 if not groq_api_key:
+    # Solleva un'eccezione se la chiave API manca
     raise ValueError("La variabile d'ambiente GROQ_API_KEY non è stata impostata.")
 
 # --- Costanti e Configurazione ---
@@ -25,8 +26,8 @@ JAVA_TEST_DIR = Path("src") / "test" / "java"
 # Contenuto di un pom.xml minimalista per JUnit 5
 POM_CONTENT = """
 <project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <groupId>com.ai</groupId>
     <artifactId>generated-tests</artifactId>
@@ -123,6 +124,7 @@ def save_code_to_file(content: str, file_type: str, language: str, timestamp: st
     lang_lower = language.lower().replace("#", "sharp") 
     
     if language.lower() == "python" and file_type == "source":
+        # Nome fisso per il modulo Python da importare (corrisponde al prompt)
         filename = "target_module.py"
     else:
         ext = extension_map.get(lang_lower, "txt")
@@ -148,6 +150,7 @@ def execute_tests(language: str, source_path_str: str, test_path_str: str) -> st
     language = language.lower()
     working_dir = Path(source_path_str).parent
     
+    # Assicurati di leggere dal disco i contenuti salvati in caso di modifica del post-processing
     source_content = Path(source_path_str).read_text(encoding="utf-8")
     test_content = Path(test_path_str).read_text(encoding="utf-8")
     
@@ -155,11 +158,12 @@ def execute_tests(language: str, source_path_str: str, test_path_str: str) -> st
     if language == "python":
         
         init_file = working_dir / "__init__.py"
-        init_file.touch()
+        init_file.touch() # Rende la cartella un pacchetto Python per l'importazione
         test_file_name = Path(test_path_str).name
 
         try:
-            command = ["python", "-m", "unittest", "-v", test_file_name]
+            # Esegui unittest sulla cartella (che contiene i file sorgente e test)
+            command = ["python", "-m", "unittest", "-v", test_file_name] 
             result = subprocess.run(
                 command, cwd=working_dir, capture_output=True, text=True, timeout=15 
             )
@@ -215,7 +219,8 @@ def execute_tests(language: str, source_path_str: str, test_path_str: str) -> st
                 return "Maven BUILD SUCCESS. Output completo dell'esecuzione:\n\n" + output
             
             elif "BUILD FAILURE" in output:
-                 return "Maven BUILD FAILURE. Compilazione o fallimento dei test.\n\n" + output[-3000:]
+                 # Troncamento dell'output per non sovraccaricare il frontend
+                 return "Maven BUILD FAILURE. Compilazione o fallimento dei test.\n\n" + output[-3000:] 
                  
             return output 
             
@@ -248,7 +253,7 @@ async def generate_tests(request: TestGenerationRequest):
     if request.language.lower() == "java":
         clean_java_files(OUTPUT_DIR)
     
-    # *** NUOVO PROMPT CON ISTRUZIONI CONDIZIONALI ***
+    # Estrae il nome della classe per l'uso nel prompt e nel post-processing
     source_class_name = extract_class_name(request.code)
     
     prompt = f"""
@@ -267,15 +272,15 @@ async def generate_tests(request: TestGenerationRequest):
     
     [IF PYTHON]:
     - **Unittest:** Utilizza il modulo standard `unittest`.
-    - **Importazione:** Devi importare il codice da testare usando `from target_module import {source_class_name}`.
+    - **Importazione:** Devi importare il codice da testare usando l'esatta sintassi: `from target_module import {source_class_name}`. **È CRUCIALE usare 'target\_module', non il nome della classe.**
+    - **Mocking:** Usa `unittest.mock.patch` per catturare l'output su console (`sys.stdout`) se necessario per testare metodi che usano `print()`.
 
     Codice da testare:
     ```{request.language}
     {request.code}
     ```
     """
-    # *************************************************
-
+    
     try:
         # 1. Chiamata LLM
         chat_completion = client.chat.completions.create(
@@ -288,12 +293,28 @@ async def generate_tests(request: TestGenerationRequest):
         raw_generated_code = chat_completion.choices[0].message.content
         generated_test_code = clean_generated_code(raw_generated_code)
 
-        # 2. POST-PROCESSING (Per robustezza su Python e Java)
+        # 2. POST-PROCESSING (Correzioni per robustezza)
+        
         if request.language.lower() == "python":
-            # Correzione Python: assicura l'import unittest (anche se il prompt lo chiede)
+            
+            # 2.1. Assicura l'import unittest
             if "import unittest" not in generated_test_code:
                 generated_test_code = "import unittest\n" + generated_test_code
-        
+
+            # 2.2. CORREZIONE CRUCIALE: Assicura l'importazione della classe da target_module
+            correct_import_statement = f"from target_module import {source_class_name}"
+            
+            # Pattern per trovare import [qualcosa] import [NomeClasse]
+            import_pattern = re.compile(r"from\s+\w+\s+import\s+" + re.escape(source_class_name), re.IGNORECASE)
+            
+            if import_pattern.search(generated_test_code):
+                # Se c'è un import esistente (corretto o errato), lo sostituiamo con l'import corretto
+                generated_test_code = import_pattern.sub(correct_import_statement, generated_test_code, 1)
+            else:
+                # Se manca del tutto, lo aggiungiamo subito dopo 'import unittest'
+                generated_test_code = generated_test_code.replace("import unittest", f"import unittest\n{correct_import_statement}", 1)
+
+            
         elif request.language.lower() == "java":
             # Correzione Java: assicura l'import @Test
             junit_test_import = "import org.junit.jupiter.api.Test;"
@@ -303,9 +324,11 @@ async def generate_tests(request: TestGenerationRequest):
         # 3. Logica di SALVATAGGIO LOCALE
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         
+        # Salviamo il codice sorgente (che in Python sarà target_module.py)
         source_path_str = save_code_to_file(
             content=request.code, file_type="source", language=request.language, timestamp=timestamp
         )
+        # Salviamo il codice di test (che potrebbe essere stato modificato dal post-processing)
         test_path_str = save_code_to_file(
             content=generated_test_code, file_type="test", language=request.language, timestamp=timestamp
         )
@@ -333,4 +356,5 @@ async def generate_tests(request: TestGenerationRequest):
 
 if __name__ == "__main__":
     import uvicorn
+    # Avviare il backend sulla porta 8000
     uvicorn.run(app, host="127.0.0.1", port=8000)
