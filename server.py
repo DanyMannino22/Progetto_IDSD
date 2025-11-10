@@ -301,6 +301,10 @@ async def generate_tests(request: TestGenerationRequest):
             if "import unittest" not in generated_test_code:
                 generated_test_code = "import unittest\n" + generated_test_code
 
+            if "import io" not in generated_test_code and "StringIO" in generated_test_code:
+                # Aggiunge 'import io' subito dopo le altre importazioni standard
+                generated_test_code = generated_test_code.replace("import unittest", "import unittest\nimport io", 1)
+                
             # 2.2. CORREZIONE CRUCIALE: Assicura l'importazione della classe da target_module
             correct_import_statement = f"from target_module import {source_class_name}"
             
